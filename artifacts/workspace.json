@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid30844",
+  "B": "/home/dev/feedback/uid30844",
+  "sha": "9a77ae293a0914a7349ac8f22ebb62bff0cd7267",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "defparam",
+    "repo": "smuggler",
+    "sha": "9a77ae293a0914a7349ac8f22ebb62bff0cd7267"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "smuggler",
+    "cloneUrl": "https://github.com/Rrr119/smuggler.git"
+  },
+  "at": "2026-11-21T06:54:37.215Z"
+}

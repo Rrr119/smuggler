@@ -84,6 +84,18 @@ Use --no-color to suppress the output color codes printed to stdout (logs by def
 
 Use -c/--configfile \<configfile> to specify your smuggler mutation configuration file (default: default.py)
 
+## Detections
+Before running the transfer-encoding mutations, Smuggler performs a built-in CL.0 desync check: it sends a request whose
+`Content-Length` body is a partial smuggled request, then issues a follow-up request on the same connection. If the
+follow-up times out (subject to -t/--timeout) or returns the smuggled response, a `Potential CL0 Issue Found` is
+reported and the PoC payload is written to the ./payloads directory, just like the TECL/CLTE findings.
+
+## Tests
+A local mock front-end/back-end range (vulnerable CL.0 and strict modes) plus unittests live in ./tests:
+```
+python3 -m unittest discover -s tests -v
+```
+
 ## Config Files
 Configuration files are python files that exist in the ./config directory of smuggler. These files describe the content of the HTTP requests and the transfer-encoding mutations to test.
 
